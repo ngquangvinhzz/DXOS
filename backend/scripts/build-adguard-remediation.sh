@@ -8,13 +8,13 @@ reports="$output_dir/reports"
 mkdir -p "$reports" "$output_dir/tools"
 cd "$source_dir"
 test "$(git rev-parse HEAD)" = '05ba17b282da1c4393d6a4ba4db0cf519194a362'
-test "$(go env GOVERSION)" = 'go1.26.9'
+test "$(go env GOVERSION)" = 'go1.26.10'
 export GOTOOLCHAIN=local GOTELEMETRY=off CGO_ENABLED=0
 export GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org
 cp go.mod go.mod.original
-go mod edit -go=1.26.9
-go get golang.org/x/crypto@v0.57.0 golang.org/x/net@v0.60.0 golang.org/x/text@v0.42.0
-go mod tidy
+go mod edit -go=1.26.10
+go get github.com/insomniacslk/dhcp@v0.0.0-20260719225207-c76316d4aa82 golang.org/x/crypto@v0.57.0 golang.org/x/net@v0.60.0 golang.org/x/text@v0.42.0
+git diff -- go.mod go.sum > "$reports/dependency.patch"
 node "$project_root/backend/scripts/review-adguard-remediation.js" delta "$source_dir"
 go mod verify
 git diff --exit-code -- . ':!go.mod' ':!go.sum'
@@ -30,24 +30,29 @@ tar --no-same-owner --no-same-permissions -xzf "$output_dir/frontend.tar.gz" -C 
 test -s build/static/index.html
 test -s build/static/login.html
 test -s build/static/install.html
-go test -json -count=1 -timeout=5m ./... > "$output_dir/go-tests.private.jsonl"
+test_exit=0
+go test -mod=readonly -json -count=1 -timeout=5m ./... > "$output_dir/go-tests.private.jsonl" || test_exit=$?
 node - "$output_dir/go-tests.private.jsonl" "$reports/go-tests.json" <<'NODE'
 const fs=require('node:fs');
 const lines=fs.readFileSync(process.argv[2],'utf8').split('\n').filter(Boolean).map(l=>JSON.parse(l));
 const passes=lines.filter(x=>x.Action==='pass'),fails=lines.filter(x=>x.Action==='fail');
-if(!passes.length||fails.length)throw Error('UPSTREAM_TESTS_INCOMPLETE');
-fs.writeFileSync(process.argv[3],JSON.stringify({status:'PASS',tests:passes.filter(x=>x.Test).length,packages:passes.filter(x=>!x.Test).length,scope:'go test ./... on patched source; upstream test output not published'},null,2)+'\n');
+const status=passes.length&&!fails.length?'PASS':'FAIL';
+fs.writeFileSync(process.argv[3],JSON.stringify({status,tests:passes.filter(x=>x.Test).length,packages:passes.filter(x=>!x.Test).length,failures:fails.map(x=>({package:x.Package,test:x.Test||null})),scope:'go test ./... on patched source; upstream test output not published'},null,2)+'\n');
+if(status!=='PASS')throw Error('UPSTREAM_TESTS_INCOMPLETE');
 NODE
+test "$test_exit" = '0'
 epoch="$(git show -s --format=%ct HEAD)"
 version_pkg='github.com/AdguardTeam/AdGuardHome/internal/version'
-flags="-s -w -X ${version_pkg}.version=v0.107.79-dxos.1 -X ${version_pkg}.channel=candidate -X ${version_pkg}.committime=${epoch}"
-go build -trimpath -buildvcs=false -ldflags "$flags" -o "$output_dir/AdGuardHome" .
-go build -trimpath -buildvcs=false -ldflags "$flags" -o "$output_dir/AdGuardHome-second" .
+flags="-X ${version_pkg}.version=v0.107.79-dxos.1 -X ${version_pkg}.channel=candidate -X ${version_pkg}.committime=${epoch}"
+go build -mod=readonly -trimpath -buildvcs=false -ldflags "$flags" -o "$output_dir/AdGuardHome" .
+go build -mod=readonly -trimpath -buildvcs=false -ldflags "$flags" -o "$output_dir/AdGuardHome-second" .
 cmp "$output_dir/AdGuardHome" "$output_dir/AdGuardHome-second"
 "$output_dir/AdGuardHome" --version | tee "$reports/version.txt"
 grep -F 'v0.107.79-dxos.1' "$reports/version.txt"
-go list -deps . > "$reports/production-imports.txt"
+go list -mod=readonly -deps . > "$reports/production-imports.txt"
+go tool nm "$output_dir/AdGuardHome" > /dev/null
 go tool govulncheck -mode=binary "$output_dir/AdGuardHome" > "$reports/govulncheck.txt"
+go tool govulncheck . > "$reports/govulncheck-source.txt"
 curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
   'https://github.com/aquasecurity/trivy/releases/download/v0.76.0/trivy_0.76.0_Linux-64bit.tar.gz' -o "$output_dir/trivy.tar.gz"
 echo "e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7  $output_dir/trivy.tar.gz" | sha256sum --check --status
@@ -64,7 +69,7 @@ node - "$source_dir" "$output_dir" <<'NODE'
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
 const output=process.argv[3];
 const binarySha256=crypto.createHash('sha256').update(fs.readFileSync(path.join(output,'AdGuardHome'))).digest('hex');
-const provenance={upstream:'05ba17b282da1c4393d6a4ba4db0cf519194a362',version:'v0.107.79-dxos.1',platform:'linux/amd64',go:'go1.26.9',reproducible:true,reproducibilityScope:'Two builds on the same isolated runner',binarySha256,dxosHead:process.env.DXOS_HEAD_SHA,workflowRevision:process.env.GITHUB_SHA,runUrl:`https://github.com/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,frontendSha256:'30184c157d4aefe5371b575a43c0ab5a7314aef039a820cc421ea67bab994ce8',signature:'NOT_UPSTREAM_SIGNED'};
+const provenance={upstream:'05ba17b282da1c4393d6a4ba4db0cf519194a362',version:'v0.107.79-dxos.1',platform:'linux/amd64',go:'go1.26.10',reproducible:true,reproducibilityScope:'Two builds on the same isolated runner; symbol table retained for binary vulnerability analysis',binarySha256,dxosHead:process.env.DXOS_HEAD_SHA,workflowRevision:process.env.GITHUB_SHA,runUrl:`https://github.com/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,frontendSha256:'30184c157d4aefe5371b575a43c0ab5a7314aef039a820cc421ea67bab994ce8',signature:'NOT_UPSTREAM_SIGNED'};
 fs.writeFileSync(path.join(output,'reports/build.json'),JSON.stringify(provenance,null,2)+'\n');
 NODE
 node "$project_root/backend/scripts/review-adguard-remediation.js" review "$reports"
@@ -83,8 +88,8 @@ cp "$(go env GOROOT)/LICENSE" .dxos-go-stdlib/LICENSE
 cat > DXOS-REBUILD.txt <<EOF
 Corresponding source for v0.107.79-dxos.1 (Linux amd64).
 Upstream commit: 05ba17b282da1c4393d6a4ba4db0cf519194a362.
-Use official Go 1.26.9 Linux amd64 SDK SHA-256:
-42d158b4d8f7b61ac0a830567c940a86098fb7aac52e467a5ebec03ef5cc2f8d.
+Use official Go 1.26.10 Linux amd64 SDK SHA-256:
+ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5.
 The patched modules, vendor sources, original frontend asset and client sources
 are included. Standard library source/LICENSE is in .dxos-go-stdlib.
 The original CI build recipe, review recipe and dependency.patch are included.
